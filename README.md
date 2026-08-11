@@ -7,6 +7,8 @@ ProcessWire's core translation tools work great for editing translations of *one
 
 Language CSV Exporter adds a simple admin page: pick a module, pick a language, click download — you get a single CSV file with every registered translation for that module and language.
 
+This module is specifically designed for module developers who want to ship their modules with language files. Instead of manually copying all translation files into a single CSV file, you can export them with just one click using this module.
+
 ## Features
 
 - Simple, one-page admin interface under **Setup → Language CSV Exporter**
