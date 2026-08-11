@@ -52,7 +52,7 @@ class LanguageCSVExporter extends Process implements Module
 
         if (!$permissions->get('language-csv-exporter')) {
 
-            $permissions->add('language-csdv-exporter');
+            $permissions->add('language-csv-exporter');
 
             $permission = $permissions->get('language-csv-exporter');
 
