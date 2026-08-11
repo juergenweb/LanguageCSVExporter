@@ -47,6 +47,11 @@ class LanguageCSVExporter extends Process implements Module
      */
     public function ___install()
     {
+        // Process::___install() is what actually creates the admin page
+        // based on the 'page' property in getModuleInfo() - defining an
+        // own ___install() here without calling the parent's would
+        // silently skip that page creation entirely.
+        parent::___install();
 
         $permissions = $this->wire()->permissions;
 
@@ -77,6 +82,11 @@ class LanguageCSVExporter extends Process implements Module
         if ($permission && $permission->id) {
             $permissions->delete($permission);
         }
+
+        // Process::___uninstall() removes the admin page created above -
+        // called last, since it may need the module to still be fully
+        // available while it looks up/removes the page.
+        parent::___uninstall();
     }
 
 
