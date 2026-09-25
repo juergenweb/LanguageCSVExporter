@@ -8,7 +8,7 @@ namespace ProcessWire;
  * Exports the translations of a selected module
  * for a selected language as a downloadable CSV file.
  *
- * @version 1.0.0
+ * @version 1.0.1
  * @license MIT
  */
 
@@ -18,7 +18,7 @@ class LanguageCSVExporter extends Process implements Module
     {
         return [
             'title' => 'Language CSV Exporter',
-            'version' => '1.0.0',
+            'version' => '1.0.1',
             'summary' => 'Exports module translations of a selected language as a downloadable CSV file.',
             'author' => 'Juergen Kern',
             'icon' => 'language',
@@ -29,10 +29,14 @@ class LanguageCSVExporter extends Process implements Module
 
             'permission' => 'language-csv-exporter',
 
+            // Created on install and removed on uninstall automatically
+            // by the core (ModulesInstaller) - no own code needed.
             'permissions' => [
                 'language-csv-exporter' => 'Use Language CSV Exporter',
             ],
 
+            // Admin page is created/removed automatically by the inherited
+            // Process::___install() / Process::___uninstall().
             'page' => [
                 'name' => 'language-csv-exporter',
                 'parent' => 'setup',
@@ -43,51 +47,13 @@ class LanguageCSVExporter extends Process implements Module
 
 
     /**
-     * Install
+     * Escape character for fgetcsv()/fputcsv()
+     *
+     * Passed explicitly (PHP 8.4 deprecates relying on the default) and
+     * identical to the default used by LanguagePorter, so the written
+     * CSV stays byte-compatible with the core's own export/import.
      */
-    public function ___install()
-    {
-        // Process::___install() is what actually creates the admin page
-        // based on the 'page' property in getModuleInfo() - defining an
-        // own ___install() here without calling the parent's would
-        // silently skip that page creation entirely.
-        parent::___install();
-
-        $permissions = $this->wire()->permissions;
-
-        if (!$permissions->get('language-csv-exporter')) {
-
-            $permissions->add('language-csv-exporter');
-
-            $permission = $permissions->get('language-csv-exporter');
-
-            if ($permission) {
-                $permission->title = 'Use Language CSV Exporter';
-                $permission->save();
-            }
-        }
-    }
-
-
-    /**
-     * Uninstall
-     */
-    public function ___uninstall()
-    {
-
-        $permissions = $this->wire()->permissions;
-
-        $permission = $permissions->get('language-csv-exporter');
-
-        if ($permission && $permission->id) {
-            $permissions->delete($permission);
-        }
-
-        // Process::___uninstall() removes the admin page created above -
-        // called last, since it may need the module to still be fully
-        // available while it looks up/removes the page.
-        parent::___uninstall();
-    }
+    const CSV_ESCAPE = '\\';
 
 
     /**
@@ -142,10 +108,7 @@ class LanguageCSVExporter extends Process implements Module
 
         $moduleOptions = [];
 
-        $moduleInfos = $modules->getModuleInfo('*');
-
-
-        foreach ($moduleInfos as $info) {
+        foreach ($modules->getModuleInfo('*') as $info) {
 
             if (empty($info['name'])) {
                 continue;
@@ -240,91 +203,21 @@ class LanguageCSVExporter extends Process implements Module
          * ---------------------------------------------------------
          * Form submission
          * ---------------------------------------------------------
+         *
+         * All errors (including CSRF errors thrown by processInput())
+         * are caught here and shown as a notice, so the form is still
+         * rendered below instead of an empty admin page.
          */
 
         if ($input->post->export_language_csv) {
 
-            /**
-             * ProcessWire handles CSRF checking here.
-             */
-            $form->processInput($input->post);
+            try {
 
+                $this->processExport($form);
 
-            if (!$form->getErrors()) {
+            } catch (WireException $e) {
 
-                $moduleName =
-                    $form->getChildByName('module')->value;
-
-                $languageName =
-                    $form->getChildByName('language')->value;
-
-
-                /**
-                 * Check module
-                 */
-                if (!$modules->isInstalled($moduleName)) {
-
-                    $this->error(
-                        'The selected module is not installed.'
-                    );
-
-                } else {
-
-                    /**
-                     * Load module
-                     */
-                    $module = $modules->getModule(
-                        $moduleName,
-                        [
-                            'noInstall' => true,
-                            'noPermissionCheck' => true,
-                            'noThrow' => true,
-                        ]
-                    );
-
-
-                    if (!$module) {
-
-                        $this->error(
-                            'The selected module could not be loaded.'
-                        );
-
-                    } else {
-
-                        /**
-                         * Load language
-                         */
-                        $language =
-                            $languages->get($languageName);
-
-
-                        if (!$language || !$language->id) {
-
-                            $this->error(
-                                'The selected language was not found.'
-                            );
-
-                        } else {
-
-                            /**
-                             * Generate and download CSV export
-                             */
-                            $csvExportFile =
-                                $this->createCsvExport(
-                                    $module,
-                                    $language
-                                );
-
-
-                            /**
-                             * Download CSV
-                             */
-                            $this->downloadCsv(
-                                $csvExportFile
-                            );
-                        }
-                    }
-                }
+                $this->error($e->getMessage());
             }
         }
 
@@ -336,8 +229,6 @@ class LanguageCSVExporter extends Process implements Module
          */
 
         $out = '';
-
-        $out .= '<h2>Language CSV Exporter</h2>';
 
         $out .= '<p>';
         $out .=
@@ -355,191 +246,105 @@ class LanguageCSVExporter extends Process implements Module
 
 
     /**
-     * Exclude specific source files from a CSV file
+     * Process the submitted form and send the CSV download
      *
-     * Reads the CSV file generated by LanguagePorter::exportCsv() and
-     * removes the rows whose "file" column is contained in
-     * $excludedFiles. Used to cleanly separate translations of multiple
-     * modules that share the same folder (see createCsvExport()).
+     * Does not return on success (the download ends the request).
      *
-     * @param string $csvFile Path to the CSV file (overwritten in-place)
-     * @param array $excludedFiles Relative file paths to exclude (as in the "file" column)
+     * @param InputfieldForm $form
      * @return void
      * @throws WireException
      */
-    protected function excludeFilesFromCsv(
-        $csvFile,
-        array $excludedFiles
-    ) {
+    protected function processExport(InputfieldForm $form)
+    {
 
-        $excludedFiles = array_flip($excludedFiles);
+        $modules   = $this->wire()->modules;
+        $languages = $this->wire()->languages;
 
-        $handle = fopen($csvFile, 'r');
+        /**
+         * ProcessWire handles CSRF checking here.
+         */
+        $form->processInput($this->wire()->input->post);
 
-        if (!$handle) {
-
-            throw new WireException(
-                'The CSV file could not be opened for filtering.'
-            );
-        }
-
-        $header = fgetcsv($handle);
-
-        if (!is_array($header)) {
-
-            fclose($handle);
+        if ($form->getErrors()) {
             return;
         }
 
-        $fileColumnIndex = array_search('file', $header);
+        $moduleName =
+            (string) $form->getChildByName('module')->value;
 
-        if ($fileColumnIndex === false) {
+        $languageName =
+            (string) $form->getChildByName('language')->value;
 
-            // no "file" column present - cannot filter,
-            // leave the file unchanged
-            fclose($handle);
-            return;
-        }
 
-        $filteredRows = [];
-
-        while (($row = fgetcsv($handle)) !== false) {
-
-            $rowFile =
-                isset($row[$fileColumnIndex]) ?
-                    str_replace('\\', '/', $row[$fileColumnIndex]) :
-                    '';
-
-            if (!isset($excludedFiles[$rowFile])) {
-
-                $filteredRows[] = $row;
-            }
-        }
-
-        fclose($handle);
-
-        $outHandle = fopen($csvFile, 'w');
-
-        if (!$outHandle) {
+        /**
+         * Check module
+         *
+         * The module is intentionally NOT loaded/instantiated - only its
+         * name and file location are needed, and loading a foreign module
+         * would run its init() with possible side effects.
+         */
+        if ($moduleName === '' || !$modules->isInstalled($moduleName)) {
 
             throw new WireException(
-                'The filtered CSV file could not be written.'
+                'The selected module is not installed.'
             );
         }
 
-        fputcsv($outHandle, $header);
 
-        foreach ($filteredRows as $row) {
+        /**
+         * Load language
+         */
+        $language = $languages->get($languageName);
 
-            fputcsv($outHandle, $row);
+        if (!$language || !$language->id) {
+
+            throw new WireException(
+                'The selected language was not found.'
+            );
         }
 
-        fclose($outHandle);
+
+        /**
+         * Generate CSV export in memory
+         */
+        $csv = $this->createCsvExport(
+            $moduleName,
+            $language
+        );
+
+
+        /**
+         * Download CSV
+         */
+        $filename =
+            $this->sanitizeFilename($moduleName) .
+            '-' .
+            $this->sanitizeFilename($language->name) .
+            '-translations.csv';
+
+        $this->downloadCsv(
+            $csv,
+            $filename
+        );
     }
 
 
     /**
-     * Restrict a CSV file to specific source files
+     * Generate the module's translation export as a CSV string
      *
-     * Reads the CSV file generated by LanguagePorter::exportCsv() and
-     * keeps only the rows whose "file" column is contained in
-     * $allowedFiles. The counterpart to excludeFilesFromCsv() - used for
-     * "guest" modules that are a single, standalone file inside a
-     * shared folder (see createCsvExport()).
-     *
-     * @param string $csvFile Path to the CSV file (overwritten in-place)
-     * @param array $allowedFiles Allowed, relative file paths (as in the "file" column)
-     * @return void
-     * @throws WireException
-     */
-    protected function restrictCsvToFiles(
-        $csvFile,
-        array $allowedFiles
-    ) {
-
-        $allowedFiles = array_flip($allowedFiles);
-
-        $handle = fopen($csvFile, 'r');
-
-        if (!$handle) {
-
-            throw new WireException(
-                'The CSV file could not be opened for filtering.'
-            );
-        }
-
-        $header = fgetcsv($handle);
-
-        if (!is_array($header)) {
-
-            fclose($handle);
-            return;
-        }
-
-        $fileColumnIndex = array_search('file', $header);
-
-        if ($fileColumnIndex === false) {
-
-            // no "file" column present - cannot filter,
-            // leave the file unchanged
-            fclose($handle);
-            return;
-        }
-
-        $filteredRows = [];
-
-        while (($row = fgetcsv($handle)) !== false) {
-
-            $rowFile =
-                isset($row[$fileColumnIndex]) ?
-                    str_replace('\\', '/', $row[$fileColumnIndex]) :
-                    '';
-
-            if (isset($allowedFiles[$rowFile])) {
-
-                $filteredRows[] = $row;
-            }
-        }
-
-        fclose($handle);
-
-        $outHandle = fopen($csvFile, 'w');
-
-        if (!$outHandle) {
-
-            throw new WireException(
-                'The filtered CSV file could not be written.'
-            );
-        }
-
-        fputcsv($outHandle, $header);
-
-        foreach ($filteredRows as $row) {
-
-            fputcsv($outHandle, $row);
-        }
-
-        fclose($outHandle);
-    }
-
-
-    /**
-     * Generate the module's translation export as a CSV file
-     *
-     * @param Module $module
+     * @param string $moduleName
      * @param Language $language
-     * @return string
+     * @return string CSV data (header + at least one row)
      * @throws WireException
      */
     protected function createCsvExport(
-        Module $module,
+        $moduleName,
         Language $language
     ) {
         /**
          * LanguagePorter available?
          */
         $porter = $language->porter;
-
 
         if (!$porter) {
 
@@ -551,27 +356,24 @@ class LanguageCSVExporter extends Process implements Module
 
         /**
          * ---------------------------------------------------------
-         * Determine module path
+         * Determine module file, directory and export source
          * ---------------------------------------------------------
          *
          * Example:
          *
          * /var/www/html/site/modules/FrontendForms/FrontendForms.module.php
          *
-         * becomes:
+         * becomes the source:
          *
          * site/modules/FrontendForms
          */
 
-        $modules = $this->wire()->modules;
-        $config  = $this->wire()->config;
-
+        $rootPath = $this->rootPath();
 
         $moduleFile =
-            $modules->getModuleFile(
-                $module
+            $this->wire()->modules->getModuleFile(
+                $moduleName
             );
-
 
         if (!$moduleFile || !is_file($moduleFile)) {
 
@@ -580,332 +382,483 @@ class LanguageCSVExporter extends Process implements Module
             );
         }
 
+        $moduleFile      = $this->normalizePath($moduleFile);
+        $moduleDirectory = dirname($moduleFile);
 
-        $moduleDirectory =
-            dirname($moduleFile);
-
-
-        $rootPath =
-            rtrim(
-                $config->paths->root,
-                '/\\'
-            );
-
-
-        $source =
-            str_replace(
-                $rootPath . DIRECTORY_SEPARATOR,
-                '',
-                $moduleDirectory
-            );
-
-        /**
-         * Normalize Windows paths
-         */
-        $source =
-            str_replace(
-                '\\',
-                '/',
-                $source
-            );
-
-
-        $source =
-            trim(
-                $source,
-                '/'
-            );
-
-
-        /**
-         * ---------------------------------------------------------
-         * Check whether the module has any translation files at all
-         * ---------------------------------------------------------
-         */
-
-        $moduleLanguageFiles =
-            $modules->getModuleLanguageFiles(
-                $module
-            );
-
-
-        if (
-            !is_array($moduleLanguageFiles) ||
-            !count($moduleLanguageFiles)
-        ) {
+        if (strpos($moduleDirectory . '/', $rootPath) !== 0) {
 
             throw new WireException(
-                'No translation files were found for the module "' .
-                $module->className() .
-                '".'
+                'The module file is located outside of the ProcessWire root directory.'
             );
         }
 
+        $source = trim(
+            substr($moduleDirectory, strlen($rootPath)),
+            '/'
+        );
+
 
         /**
          * ---------------------------------------------------------
-         * Export CSV
+         * Export CSV (in memory)
          * ---------------------------------------------------------
          *
-         * ProcessWire 3.0.264+:
+         * registered = translation files that already exist for this
+         * language. 'exportTo' => 'string' avoids writing a temporary
+         * (and unfiltered) CSV file into the publicly accessible
+         * site/assets/files/ directory of the language page.
          *
-         * LanguagePorter::exportCsv()
-         *
-         * registered = already registered translation files.
+         * exportCsv() throws a WireException if there are no registered
+         * translation files at all for the source - it is replaced by a
+         * more helpful message here.
          */
 
-        $csvFile =
-            $porter->exportCsv([
-                'source' => $source,
-                'scope'  => 'registered',
+        $notFoundMessage =
+            'No translations were found for the module "' .
+            $moduleName .
+            '" in the language "' .
+            $language->title .
+            '". Open the module\'s files at least once in ' .
+            'Setup > Languages > ' . $language->title .
+            ' > Translate files, so they are registered for this language.';
+
+        try {
+
+            $csv = $porter->exportCsv([
+                'source'   => $source,
+                'scope'    => 'registered',
+                'exportTo' => 'string',
             ]);
 
+        } catch (WireException $e) {
 
-        if (!$csvFile || !is_file($csvFile)) {
-
-            throw new WireException(
-                'No translations were found for the module "' .
-                $module->className() .
-                '" in the language "' .
-                $language->title .
-                '".'
-            );
+            throw new WireException($notFoundMessage);
         }
+
+        if (!is_string($csv) || $csv === '') {
+
+            throw new WireException($notFoundMessage);
+        }
+
 
         /**
          * ---------------------------------------------------------
          * Restrict CSV to the files that belong to this module
          * ---------------------------------------------------------
          *
-         * 'source' in exportCsv() is always just a directory prefix
-         * filter (see PW API docs), not a file filter. If several
-         * modules live in the same folder (e.g. FrontendForms.module
-         * and FrontendFormsManager.module in the same
-         * site/modules/FrontendForms/ directory), the translations of
-         * ALL of them automatically end up in the exported CSV.
-         *
-         * Modules::getModuleLanguageFiles() cannot be used to fix this:
-         * it returns the module's own, already-translated language
-         * files (e.g. languages/de-frontendforms.csv), not the PHP
-         * source files that actually contain the __() calls - so it
-         * never matches anything in the CSV's "file" column.
-         *
-         * Two cases are handled here, since a "primary" module (e.g.
-         * FrontendForms, which the shared folder is named after and
-         * which owns many supporting files spread across
-         * subdirectories) and a "guest" module (e.g.
-         * FrontendFormsManager, a single, standalone file living in
-         * that same folder) need opposite strategies:
-         *
-         * - Primary module (folder name matches its class name): keep
-         *   everything in the folder EXCEPT the other, sibling modules'
-         *   own files - their supporting subdirectory files (if any)
-         *   are assumed to belong to the primary module.
-         * - Guest module (folder name does NOT match its class name):
-         *   keep ONLY rows whose file exactly matches this module's own
-         *   file - it is a standalone file with no supporting
-         *   subdirectory files of its own inside the shared folder.
+         * 'source' in exportCsv() is only a directory prefix filter.
+         * If several modules live in the same folder (e.g.
+         * FrontendForms.module and FrontendFormsManager.module in
+         * site/modules/FrontendForms/), or in subfolders of it, the
+         * translations of ALL of them end up in the exported CSV.
+         * See getFileOwnershipRules() for how this is resolved.
          */
 
-        $moduleOwnFile =
-            str_replace(
-                '\\',
-                '/',
-                trim(
-                    str_replace(
-                        $rootPath,
-                        '',
-                        $moduleFile
-                    ),
-                    '/\\'
-                )
-            );
+        $rules = $this->getFileOwnershipRules(
+            $moduleName,
+            $moduleFile,
+            $moduleDirectory
+        );
 
-        $isPrimaryModule =
-            (basename($moduleDirectory) === $module->className());
+        $numRows = 0;
 
-        if ($isPrimaryModule) {
+        $csv = $this->filterCsv(
+            $csv,
+            function ($file) use ($rules) {
+                return $this->fileBelongsToModule($file, $rules);
+            },
+            $numRows
+        );
 
-            $otherModuleFiles = [];
+        if (!$numRows) {
 
-            foreach ($modules->getModuleInfo('*') as $otherModuleInfo) {
-
-                if (empty($otherModuleInfo['name'])) {
-                    continue;
-                }
-
-                $otherModuleName = $otherModuleInfo['name'];
-
-                if ($otherModuleName === $module->className()) {
-                    continue;
-                }
-
-                if (!$modules->isInstalled($otherModuleName)) {
-                    continue;
-                }
-
-                $otherModuleFile =
-                    $modules->getModuleFile(
-                        $otherModuleName
-                    );
-
-                if (!$otherModuleFile) {
-                    continue;
-                }
-
-                if (dirname($otherModuleFile) !== $moduleDirectory) {
-                    continue;
-                }
-
-                $otherModuleFiles[] =
-                    str_replace(
-                        '\\',
-                        '/',
-                        trim(
-                            str_replace(
-                                $rootPath,
-                                '',
-                                $otherModuleFile
-                            ),
-                            '/\\'
-                        )
-                    );
-            }
-
-            $this->excludeFilesFromCsv(
-                $csvFile,
-                $otherModuleFiles
-            );
-
-        } else {
-
-            $this->restrictCsvToFiles(
-                $csvFile,
-                [$moduleOwnFile]
-            );
+            throw new WireException($notFoundMessage);
         }
 
-
-        /**
-         * ---------------------------------------------------------
-         * Temporary export directory
-         * ---------------------------------------------------------
-         */
-
-        $tempPath =
-            rtrim(
-                $config->paths->cache,
-                '/\\'
-            ) .
-            '/LanguageCSVExporter/';
-
-
-        if (!is_dir($tempPath)) {
-
-            if (!wireMkdir($tempPath, true)) {
-
-                @unlink($csvFile);
-
-                throw new WireException(
-                    'The temporary export directory could not be created.'
-                );
-            }
-        }
-
-
-        /**
-         * Filenames
-         */
-        $moduleName =
-            $this->sanitizeFilename(
-                $module->className()
-            );
-
-
-        $languageName =
-            $this->sanitizeFilename(
-                $language->name
-            );
-
-
-        $csvFilename =
-            $moduleName .
-            '-' .
-            $languageName .
-            '-translations.csv';
-
-
-        $targetFile =
-            $tempPath .
-            $csvFilename;
-
-
-        /**
-         * Move the exported CSV to its final, descriptively named
-         * location - no ZIP wrapping needed, the CSV is delivered
-         * directly.
-         *
-         * rename() can fail if source and destination are on different
-         * filesystems/partitions, so copy() + unlink() is used as a
-         * fallback in that case.
-         */
-        if (!@rename($csvFile, $targetFile)) {
-
-            if (!copy($csvFile, $targetFile)) {
-
-                @unlink($csvFile);
-
-                throw new WireException(
-                    'The CSV file could not be moved to its final location.'
-                );
-            }
-
-            @unlink($csvFile);
-        }
-
-
-        if (!is_file($targetFile)) {
-
-            throw new WireException(
-                'The CSV file could not be created.'
-            );
-        }
-
-
-        return $targetFile;
+        return $csv;
     }
 
 
     /**
-     * Download CSV
+     * Determine which source files belong to the selected module
      *
-     * @param string $csvExportFile
+     * All modules (installed or not) whose file lives inside the
+     * selected module's directory - directly or in any subdirectory -
+     * are taken into account:
+     *
+     * - Modules in a SUBDIRECTORY own that whole subdirectory, so it is
+     *   always excluded (it would be exported separately via that module).
+     * - Among the modules DIRECTLY in the same directory, one "primary"
+     *   module is determined (see findPrimaryModule()). The primary
+     *   module gets every file in the directory except the other modules'
+     *   own files and subdirectories. Every other ("guest") module gets
+     *   only its own module file.
+     *
+     * @param string $moduleName
+     * @param string $moduleFile Normalized absolute path
+     * @param string $moduleDirectory Normalized absolute path (no trailing slash)
+     * @return array [
+     *   'ownFile' => root-relative module file,
+     *   'isPrimary' => bool,
+     *   'excludedFiles' => [root-relative file => true],
+     *   'excludedDirectories' => [root-relative dir with trailing slash, ...],
+     * ]
      */
-    protected function downloadCsv($csvExportFile)
-    {
+    protected function getFileOwnershipRules(
+        $moduleName,
+        $moduleFile,
+        $moduleDirectory
+    ) {
 
-        if (!is_file($csvExportFile)) {
-            throw new WireException(
-                'The CSV file was not found.'
+        $rootPath = $this->rootPath();
+
+        $sameDirectoryModules = [];   // className => absolute file
+        $excludedFiles        = [];
+        $excludedDirectories  = [];
+
+        foreach ($this->getAllModuleFiles() as $otherName => $otherFile) {
+
+            if (strpos($otherFile, $moduleDirectory . '/') !== 0) {
+                continue; // not inside the module's directory
+            }
+
+            $otherDirectory = dirname($otherFile);
+
+            if ($otherDirectory === $moduleDirectory) {
+
+                $sameDirectoryModules[$otherName] = $otherFile;
+                continue;
+            }
+
+            // module in a subdirectory: owns its whole directory
+            $excludedDirectories[] =
+                substr($otherDirectory, strlen($rootPath)) . '/';
+        }
+
+        // make sure the selected module itself is part of the list
+        $sameDirectoryModules[$moduleName] = $moduleFile;
+
+        $primaryModule = $this->findPrimaryModule(
+            basename($moduleDirectory),
+            array_keys($sameDirectoryModules)
+        );
+
+        $isPrimary = ($primaryModule === $moduleName);
+
+        foreach ($sameDirectoryModules as $otherName => $otherFile) {
+
+            if ($otherName === $moduleName) {
+                continue;
+            }
+
+            $excludedFiles[substr($otherFile, strlen($rootPath))] = true;
+        }
+
+        if ($primaryModule === null && count($sameDirectoryModules) > 1) {
+
+            // stored in the session: the download ends the current
+            // request, so a normal notice would never be displayed
+            $this->wire()->session->warning(
+                'Several modules share the folder "' .
+                basename($moduleDirectory) .
+                '" and none of them could be identified as the main module. ' .
+                'Only the translations of the module file itself were exported; ' .
+                'translations of shared supporting files are not included.'
             );
         }
 
-        $filename = basename($csvExportFile);
+        return [
+            'ownFile'             => substr($moduleFile, strlen($rootPath)),
+            'isPrimary'           => $isPrimary,
+            'excludedFiles'       => $excludedFiles,
+            'excludedDirectories' => array_unique($excludedDirectories),
+        ];
+    }
 
-        /**
-         * Send CSV to the browser.
-         *
-         * exit => true ends the current ProcessWire request
-         * after the file has been sent.
-         */
+
+    /**
+     * Find the "primary" module among modules sharing one directory
+     *
+     * The primary module owns the directory's supporting files. Checks,
+     * in this order:
+     *
+     * 1. Only one module in the directory -> it is primary.
+     * 2. Directory name equals a class name (case-insensitive).
+     * 3. Directory name starts with a class name, e.g. a GitHub download
+     *    "FrontendForms-main" -> "FrontendForms" (longest match wins).
+     * 4. One class name is the prefix of all other class names, e.g.
+     *    "FrontendForms" for "FrontendFormsManager".
+     *
+     * @param string $directoryName Basename of the directory
+     * @param array $classNames Class names of all modules in it
+     * @return string|null Class name of the primary module or null if none
+     */
+    protected function findPrimaryModule(
+        $directoryName,
+        array $classNames
+    ) {
+
+        if (count($classNames) === 1) {
+            return reset($classNames);
+        }
+
+        $directoryLower = strtolower($directoryName);
+
+        foreach ($classNames as $className) {
+
+            if (strtolower($className) === $directoryLower) {
+                return $className;
+            }
+        }
+
+        $best = null;
+
+        foreach ($classNames as $className) {
+
+            $classLower = strtolower($className);
+
+            if (
+                strpos($directoryLower, $classLower) === 0 &&
+                ($best === null || strlen($className) > strlen($best))
+            ) {
+                $best = $className;
+            }
+        }
+
+        if ($best !== null) {
+            return $best;
+        }
+
+        foreach ($classNames as $candidate) {
+
+            $isPrefixOfAll = true;
+
+            foreach ($classNames as $className) {
+
+                if (
+                    $className !== $candidate &&
+                    stripos($className, $candidate) !== 0
+                ) {
+                    $isPrefixOfAll = false;
+                    break;
+                }
+            }
+
+            if ($isPrefixOfAll) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+
+    /**
+     * Does the given source file belong to the selected module?
+     *
+     * @param string $file Root-relative file from the CSV "file" column
+     * @param array $rules As returned by getFileOwnershipRules()
+     * @return bool
+     */
+    protected function fileBelongsToModule($file, array $rules)
+    {
+
+        $file = ltrim($this->normalizePath($file), '/');
+
+        if ($file === $rules['ownFile']) {
+            return true;
+        }
+
+        if (!$rules['isPrimary']) {
+            return false;
+        }
+
+        if (isset($rules['excludedFiles'][$file])) {
+            return false;
+        }
+
+        foreach ($rules['excludedDirectories'] as $directory) {
+
+            if (strpos($file, $directory) === 0) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+
+    /**
+     * Get the files of all known modules (installed and uninstalled)
+     *
+     * @return array [className => normalized absolute file]
+     */
+    protected function getAllModuleFiles()
+    {
+
+        $modules = $this->wire()->modules;
+
+        $files = [];
+
+        // uninstalled modules that are present in the file system
+        foreach ($modules->getInstallable() as $className => $file) {
+
+            if ($file) {
+                $files[$className] = $this->normalizePath($file);
+            }
+        }
+
+        // installed modules
+        foreach ($modules->getModuleInfo('*') as $info) {
+
+            if (empty($info['name']) || isset($files[$info['name']])) {
+                continue;
+            }
+
+            $file = $modules->getModuleFile($info['name']);
+
+            if ($file) {
+                $files[$info['name']] = $this->normalizePath($file);
+            }
+        }
+
+        return $files;
+    }
+
+
+    /**
+     * Filter the rows of a CSV string by their "file" column
+     *
+     * @param string $csv CSV as generated by LanguagePorter::exportCsv()
+     * @param callable $keepFile function(string $file): bool
+     * @param int $numRows Receives the number of data rows kept
+     * @return string Filtered CSV (header row is always kept)
+     * @throws WireException
+     */
+    protected function filterCsv(
+        $csv,
+        callable $keepFile,
+        &$numRows = 0
+    ) {
+
+        $numRows = 0;
+
+        $in  = fopen('php://temp', 'r+');
+        $out = fopen('php://temp', 'r+');
+
+        if (!$in || !$out) {
+
+            throw new WireException(
+                'The CSV data could not be processed.'
+            );
+        }
+
+        fwrite($in, $csv);
+        rewind($in);
+
+        $header = fgetcsv($in, 0, ',', '"', self::CSV_ESCAPE);
+
+        if (!is_array($header)) {
+
+            fclose($in);
+            fclose($out);
+            return '';
+        }
+
+        $fileColumnIndex = array_search('file', $header, true);
+
+        if ($fileColumnIndex === false) {
+
+            fclose($in);
+            fclose($out);
+
+            throw new WireException(
+                'The exported CSV has no "file" column - ' .
+                'the translations cannot be assigned to the module.'
+            );
+        }
+
+        fputcsv($out, $header, ',', '"', self::CSV_ESCAPE);
+
+        while (($row = fgetcsv($in, 0, ',', '"', self::CSV_ESCAPE)) !== false) {
+
+            // skip blank lines (fgetcsv returns [null])
+            if ($row === [null]) {
+                continue;
+            }
+
+            $rowFile = isset($row[$fileColumnIndex])
+                ? (string) $row[$fileColumnIndex]
+                : '';
+
+            if ($rowFile === '' || !$keepFile($rowFile)) {
+                continue;
+            }
+
+            fputcsv($out, $row, ',', '"', self::CSV_ESCAPE);
+            $numRows++;
+        }
+
+        fclose($in);
+
+        rewind($out);
+        $result = stream_get_contents($out);
+        fclose($out);
+
+        return (string) $result;
+    }
+
+
+    /**
+     * Send CSV data to the browser as a download
+     *
+     * Sent directly from memory - no temporary file is left behind.
+     * Ends the current request.
+     *
+     * @param string $csv
+     * @param string $filename
+     * @return void
+     */
+    protected function downloadCsv($csv, $filename)
+    {
+
         $this->wire()->files->send(
-            $csvExportFile,
+            false,
             [
+                'data' => $csv,
                 'forceDownload' => true,
                 'downloadFilename' => $filename,
                 'exit' => true,
             ]
         );
+    }
+
+
+    /**
+     * ProcessWire root path, normalized, with trailing slash
+     *
+     * @return string
+     */
+    protected function rootPath()
+    {
+
+        return rtrim(
+            $this->normalizePath($this->wire()->config->paths->root),
+            '/'
+        ) . '/';
+    }
+
+
+    /**
+     * Normalize a path to forward slashes
+     *
+     * @param string $path
+     * @return string
+     */
+    protected function normalizePath($path)
+    {
+
+        return str_replace('\\', '/', (string) $path);
     }
 
 
