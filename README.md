@@ -56,12 +56,23 @@ This is the same format used by ProcessWire's own language import/export tools, 
 
 Some modules ship as a pair — a main module plus a companion module — both living in the same folder (for example `site/modules/FrontendForms/` might contain both `FrontendForms.module` and `FrontendFormsManager.module`). Since ProcessWire's own CSV export only supports filtering by folder, exporting either one of these modules on its own would normally also pull in the other's translations.
 
-This module works around that by distinguishing between:
+This module works around that by looking at every module (installed or not) whose file lives inside the selected module's folder:
 
-- The **primary** module — the one the shared folder is named after, and which typically owns many supporting files spread across subdirectories. Its export includes everything in the folder *except* files that belong to other, sibling modules.
-- A **guest** module — a companion module living in someone else's folder, usually a single, standalone file. Its export is restricted to *only* its own file.
+- **Modules in a subfolder** (e.g. `site/modules/FrontendForms/SubModules/FooBar/FooBar.module`) own that whole subfolder. It is always excluded — export that module separately.
+- Among the modules **directly in the same folder**, one is picked as the **primary** module. Its export includes everything in the folder *except* the other modules' own files and subfolders. It is determined in this order:
+  1. it is the only module in the folder,
+  2. the folder name equals its class name (case-insensitive),
+  3. the folder name starts with its class name (e.g. a GitHub download `FrontendForms-main/`),
+  4. its class name is the prefix of all other class names in the folder (e.g. `FrontendForms` vs. `FrontendFormsManager`).
+- Every other module in that folder is a **guest** module. Its export is restricted to *only* its own file.
+
+If no primary module can be determined, every module in that folder only gets its own file, and a warning is shown.
 
 This detection is automatic and requires no configuration.
+
+## Troubleshooting
+
+**"No translations were found …"** — the export only contains *registered* translation files, i.e. files that have been opened at least once for the selected language in **Setup → Languages → (language) → Translate files**. Register the module's files there first, then export again.
 
 ## Permissions
 
